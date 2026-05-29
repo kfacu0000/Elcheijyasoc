@@ -99,4 +99,125 @@ def empalme_tramos(df, tramos, desde, hasta):
             
         fecha_fin_calculo = min(hasta, fin_tramo)
         
-        if
+        if fecha_actual != fecha_fin_calculo:
+            try:
+                factor_tramo = df.loc[fecha_fin_calculo, columna] / df.loc[fecha_actual, columna]
+                factor_total *= factor_tramo
+            except KeyError:
+                return None
+            
+        fecha_actual = fecha_fin_calculo
+        if fecha_actual == hasta:
+            break
+            
+    return factor_total
+
+def calcular_factor(df, desde, hasta, metodo):
+    try:
+        # Métodos Directos Lineales
+        if metodo == "IPC":
+            return df.loc[hasta, 'IPC'] / df.loc[desde, 'IPC']
+            
+        elif metodo == "RIPTE":
+            return df.loc[hasta, 'RIPTE'] / df.loc[desde, 'RIPTE']
+            
+        elif metodo == "Aumentos ANSES":
+            return df.loc[hasta, 'ANSES'] / df.loc[desde, 'ANSES']
+
+        # Fórmulas Jurisprudenciales Complejas
+        elif metodo == "Aumentos Gral. + Cier + Gimenez + IPC":
+            tramos = [
+                (pd.Period('2019-12', 'M'), 'ANSES'), # Hasta Dic 2019: Movilidad General
+                (pd.Period('2020-12', 'M'), 'IPC'),   # Año 2020: Fallo Cier 
+                (pd.Period('2024-03', 'M'), 'IPC'),   # 2021 a Mar 2024: Fallo Gimenez 
+                (pd.Period('2050-12', 'M'), 'IPC')    # Tramo actual
+            ]
+            return empalme_tramos(df, tramos, desde, hasta)
+
+        elif metodo == "Aumentos Gral. + Cier + Gimenez + RIPTE":
+            tramos = [
+                (pd.Period('2019-12', 'M'), 'ANSES'),
+                (pd.Period('2020-12', 'M'), 'RIPTE'), 
+                (pd.Period('2024-03', 'M'), 'RIPTE'), 
+                (pd.Period('2050-12', 'M'), 'RIPTE')  
+            ]
+            return empalme_tramos(df, tramos, desde, hasta)
+                
+        else:
+            return 1.0
+            
+    except KeyError:
+        return None
+
+# ==========================================
+# 3. INTERFAZ DE USUARIO (UI)
+# ==========================================
+st.title("⚖️ Calculadora de Movilidad Previsional (Pro)")
+st.markdown("---")
+
+with st.spinner("Descargando IPC/RIPTE oficiales y procesando tu tabla de ANSES..."):
+    df_indices = obtener_datos_reales()
+
+col1, col2 = st.columns([1, 2])
+
+with col1:
+    st.subheader("Parámetros del Beneficio")
+    monto_inicial = st.number_input("Haber original a actualizar ($)", min_value=0.0, value=150000.0, step=1000.0)
+    
+    fecha_desde = st.date_input("Fecha de origen", value=pd.to_datetime("2017-01-01"))
+    fecha_hasta = st.date_input("Fecha de liquidación", value=pd.to_datetime("today"))
+    
+    st.markdown("### Jurisprudencia a evaluar")
+    metodos_disponibles = [
+        "Aumentos ANSES",
+        "Aumentos Gral. + Cier + Gimenez + IPC",
+        "Aumentos Gral. + Cier + Gimenez + RIPTE",
+        "IPC", 
+        "RIPTE"
+    ]
+    metodos_seleccionados = st.multiselect(
+        "Seleccione los métodos para contrastar", 
+        options=metodos_disponibles,
+        default=["Aumentos ANSES", "Aumentos Gral. + Cier + Gimenez + IPC"]
+    )
+    
+    calcular_btn = st.button("Ejecutar Cálculo Comparativo", type="primary", use_container_width=True)
+
+with col2:
+    if calcular_btn and metodos_seleccionados:
+        st.subheader("Resultados de la Comparativa")
+        
+        periodo_desde = pd.Period(fecha_desde, 'M')
+        periodo_hasta = pd.Period(fecha_hasta, 'M')
+        
+        resultados = []
+        for metodo in metodos_seleccionados:
+            factor = calcular_factor(df_indices, periodo_desde, periodo_hasta, metodo)
+            
+            if factor is not None:
+                haber_actualizado = monto_inicial * factor
+                resultados.append({
+                    "Método / Fallo": metodo,
+                    "Coeficiente Acumulado": round(factor, 4),
+                    "Haber Reajustado ($)": f"${haber_actualizado:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                })
+            else:
+                st.error(f"⚠️ Faltan datos oficiales o en tu CSV para calcular: '{metodo}' en las fechas indicadas.")
+                
+        if resultados:
+            df_resultados = pd.DataFrame(resultados)
+            st.dataframe(df_resultados, use_container_width=True, hide_index=True)
+            
+            st.markdown("### Evolución Histórica Real")
+            mask = (df_indices.index >= periodo_desde) & (df_indices.index <= periodo_hasta)
+            df_grafico = df_indices.loc[mask]
+            
+            if not df_grafico.empty:
+                df_grafico_norm = (df_grafico / df_grafico.iloc[0]) * 100
+                df_grafico_norm.index = df_grafico_norm.index.to_timestamp()
+                
+                # Gráfica interactiva de la carrera de índices
+                st.line_chart(df_grafico_norm[['ANSES', 'IPC', 'RIPTE']])
+
+    elif not metodos_seleccionados:
+        st.info("👈 Selecciona al menos un método y haz clic en Ejecutar Cálculo.")
